@@ -1,24 +1,84 @@
 ﻿using BepInEx;
-using BepInEx.Logging;
+using BepInEx.Configuration;
+using Comfort.Common;
+using EFT;
+using UnityEngine;
 
-namespace SPTClientModExamples
+namespace SPT_silent_speed
 {
-    // first string below is your plugin's GUID, it MUST be unique to any other mod. Read more about it in BepInEx docs. Be sure to update it if you copy this project.
-    [BepInPlugin("SPTClientModExamples.UniqueGUID", "SPTClientModExamples", "1.0.0")]
+    [BepInPlugin("com.tasowy.SPT_silent_speed", "SPT_silent_speed", "1.0.0")]
     public class Plugin : BaseUnityPlugin
     {
-        public static ManualLogSource LogSource;
-
-        // BaseUnityPlugin inherits MonoBehaviour, so you can use base unity functions like Awake() and Update()
         private void Awake()
         {
-            // save the Logger to public static field so we can use it elsewhere in the project
-            LogSource = Logger;
-            LogSource.LogInfo("plugin loaded!");
+            Settings.Init(Config);
+            Logger.LogInfo("SPT_silent_speed loaded!");
+        }
 
-            // uncomment line(s) below to enable desired example patch, then press F6 to build the project
-            // if this solution is properly placed in a YourSPTInstall/Development folder, the compiled plugin will automatically be copied into YourSPTInstall/BepInEx/plugins
-            // new SimplePatch().Enable();
+        private void Update()
+        {
+            if (!Settings.Enabled.Value || !Singleton<IBotGame>.Instantiated)
+                return;
+
+            if (IsKeyPressed(Settings.MaxSilentKey.Value))
+                SetMaxSilentSpeed();
+        }
+
+        private void SetMaxSilentSpeed()
+        {
+            var player = Singleton<GameWorld>.Instance?.MainPlayer;
+            var ctx = player?.MovementContext;
+            if (player == null || ctx == null)
+                return;
+
+            // Silent (CovertNoiseLevel 0) is unreachable here -> do nothing.
+            if (ctx.IsInPronePose || ctx.IsSprintEnabled)
+                return;
+            if (ctx.PhysicalConditionContainsAny(EPhysicalCondition.LeftLegDamaged | EPhysicalCondition.RightLegDamaged))
+                return;
+
+            float overweight = player.Physical.WalkOverweight;
+            if (overweight >= 0.1f)
+                return;
+
+            float max = ctx.MaxSpeed;
+            if (max <= 0f)
+                return;
+
+            // From UpdateCovertEfficiency: Eff = InverseLerp(num, num-0.2, r) * (1-W), num = 0.4 * CovertMovementSpeed.
+            // Eff > 0.9  =>  r < num - 0.18 / (1-W). CovertMovementSpeed buff already includes skill level.
+            float covertBuff = player.Skills.CovertMovementSpeed;
+            float target = max * (0.4f * covertBuff - 0.18f / (1f - overweight)) - Settings.SafetyMargin.Value;
+            target = Mathf.Clamp(target, 0.05f * max, Mathf.Min(max, ctx.StateSpeedLimit));
+
+            ctx.SetCharacterMovementSpeed(target, false);
+            ctx.UpdateCovertEfficiency(ctx.ClampedSpeed, true);
+
+            // Single nudge in case of float deadband; otherwise leave speed as computed.
+            if (ctx.CovertNoiseLevel != 0)
+            {
+                target *= 0.95f;
+                ctx.SetCharacterMovementSpeed(target, false);
+                ctx.UpdateCovertEfficiency(ctx.ClampedSpeed, true);
+                if (ctx.CovertNoiseLevel != 0)
+                    return;
+            }
+
+            player.RaiseChangeSpeedEvent();
+        }
+
+        private static bool IsKeyPressed(KeyboardShortcut key)
+        {
+            if (!Input.GetKeyDown(key.MainKey))
+                return false;
+
+            foreach (var modifier in key.Modifiers)
+            {
+                if (!Input.GetKey(modifier))
+                    return false;
+            }
+
+            return true;
         }
     }
 }
